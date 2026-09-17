@@ -38,7 +38,7 @@ FOUNDRY_PROFILE=segregated forge script script/DeploySegregatedPAU.s.sol:DeployS
 
 Review returned addresses, the payload's `configuration()`, bytecode, dispatch wiring and admin ownership. Simulate **activation** with the intended configuration through existing governance before scheduling it; staging alone does not validate every activation parameter. Mainnet uses StarGuard/Spark Proxy; L2 uses the receiver/Executor queue. Queue `execute()` with delegatecall enabled. The payload checks chain/executor and reads its constructor configuration via immutable `SELF`, then atomically activates fresh permissions/integrations and creates the legacy funding key. Mainnet retains existing office hours. Re-execution and previously configured funding keys are rejected.
 
-For a dated cross-chain spell, use existing mainnet forwarding/receiver helpers to schedule the chain-local payloads. Register each fresh proxy with `_registerSegregatedFunding(chainId, freshProxy)` in that spell's test setup. Existing pre/post coverage checks then include its active funding key and continue testing legacy investment integrations.
+For a dated cross-chain spell, use existing mainnet forwarding/receiver helpers to schedule the chain-local payloads. Register each fresh proxy with `_registerSegregatedFunding(chainId, freshProxy)` in that spell's test setup. Each integration test reports the rate-limit keys it checks; pre/post coverage removes those keys from the expected list and rejects any uncovered key. The active funding key is included alongside legacy investment integrations.
 
 ## Tests
 

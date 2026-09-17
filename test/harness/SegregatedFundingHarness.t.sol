@@ -25,6 +25,26 @@ contract FundingHarnessAdapter is SparkLiquidityLayerTests {
         _testTransferAssetIntegration(params);
     }
 
+    function runIntegration(TransferAssetE2ETestParams calldata params) external returns (bytes32[] memory) {
+        return _runSLLE2ETests(
+            params.ctx,
+            SLLIntegration({
+                label: "SEGREGATED_FUNDING-USDC",
+                category: Category.TRANSFER_ASSET,
+                integration: params.destination,
+                entryId: params.transferKey,
+                entryId2: bytes32(0),
+                exitId: bytes32(0),
+                exitId2: bytes32(0),
+                extraData: abi.encode(params.asset, params.destination)
+            })
+        );
+    }
+
+    function checkReportedKeys(bytes32[] calldata expected, bytes32[] calldata reported) external pure {
+        assertEq(_removeAll(expected, reported).length, 0, "Rate limit keys not fully covered");
+    }
+
     function registerFunding(uint256 chainId, address destination) external {
         _registerSegregatedFunding(chainId, destination);
     }
@@ -70,22 +90,68 @@ contract SegregatedFundingHarnessTest is Test {
     }
 
     function _runTransfer(uint256 amount) internal {
-        harness.runTransfer(
-            SparkLiquidityLayerTests.TransferAssetE2ETestParams({
-                ctx: SparkLiquidityLayerTests.SparkLiquidityLayerContext({
-                    controller: address(controller),
-                    prevController: address(0),
-                    proxy: IALMProxy(address(proxy)),
-                    rateLimits: IRateLimits(address(limits)),
-                    relayer: relayer,
-                    freezer: address(0)
-                }),
-                asset: address(token),
-                destination: destination,
-                transferKey: key,
-                transferAmount: amount
-            })
-        );
+        harness.runTransfer(_transferParams(amount));
+    }
+
+    function _transferParams(uint256 amount)
+        internal
+        view
+        returns (SparkLiquidityLayerTests.TransferAssetE2ETestParams memory)
+    {
+        return SparkLiquidityLayerTests.TransferAssetE2ETestParams({
+            ctx: SparkLiquidityLayerTests.SparkLiquidityLayerContext({
+                controller: address(controller),
+                prevController: address(0),
+                proxy: IALMProxy(address(proxy)),
+                rateLimits: IRateLimits(address(limits)),
+                relayer: relayer,
+                freezer: address(0)
+            }),
+            asset: address(token),
+            destination: destination,
+            transferKey: key,
+            transferAmount: amount
+        });
+    }
+
+    function test_dispatcherReportsFundingKey() public {
+        vm.chainId(8453);
+        harness.registerFunding(block.chainid, destination);
+        limits.setRateLimitData(key, 1_000e18, 0);
+
+        bytes32[] memory reported = harness.runIntegration(_transferParams(400e18));
+
+        assertEq(reported.length, 1);
+        assertEq(reported[0], key);
+        assertEq(limits.getCurrentRateLimit(key), 1_000e18);
+        assertEq(token.balanceOf(destination), 0);
+    }
+
+    function test_reportedCoverageIgnoresZeroPlaceholders() public view {
+        bytes32[] memory expected = new bytes32[](1);
+        expected[0] = key;
+        bytes32[] memory reported = new bytes32[](3);
+        reported[1] = key;
+        harness.checkReportedKeys(expected, reported);
+    }
+
+    function test_reportedCoverageRejectsUnknownKeys() public {
+        bytes32[] memory expected = new bytes32[](1);
+        expected[0] = key;
+        bytes32[] memory reported = new bytes32[](1);
+        reported[0] = keccak256("UNKNOWN_KEY");
+        vm.expectRevert();
+        harness.checkReportedKeys(expected, reported);
+    }
+
+    function test_reportedCoverageRejectsMissingKeys() public {
+        bytes32[] memory expected = new bytes32[](2);
+        expected[0] = key;
+        expected[1] = keccak256("UNTESTED_KEY");
+        bytes32[] memory reported = new bytes32[](1);
+        reported[0] = key;
+        vm.expectRevert();
+        harness.checkReportedKeys(expected, reported);
     }
 
     function test_finiteFundingDoesNotRecharge() public {
@@ -172,7 +238,7 @@ contract SegregatedFundingHarnessTest is Test {
             vm.deployCode("SegregatedFundingHarness.t.sol:FundingHarnessAdapter", abi.encode(true))
         );
         SparkLiquidityLayerTests.SLLIntegration[] memory integrations = legacyHarness.preIntegrations();
-        assertEq(integrations.length, 65);
+        assertEq(integrations.length, 46);
         assertEq(_countFunding(integrations, fundingKey), 0);
         assertEq(legacyHarness.postIntegrations(integrations).length, 46);
         assertEq(address(legacyHarness.legacyContext().proxy), Ethereum.ALM_PROXY);
