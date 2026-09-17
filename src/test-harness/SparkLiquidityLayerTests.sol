@@ -314,6 +314,8 @@ abstract contract SparkLiquidityLayerTests is SpellRunner {
         address     freezer;
     }
 
+    mapping(uint256 chainId => address destination) internal segregatedFundingDestinations;
+
     struct SparkVaultV2E2ETestParams {
         SparkLiquidityLayerContext ctx;
         address                    vault;
@@ -521,6 +523,15 @@ abstract contract SparkLiquidityLayerTests is SpellRunner {
     /**********************************************************************************************/
     /*** State-Modifying Functions                                                              ***/
     /**********************************************************************************************/
+
+    function _registerSegregatedFunding(uint256 chainId, address destination) internal {
+        require(
+            chainId == ChainIdUtils.Ethereum() || chainId == ChainIdUtils.Base() || chainId == ChainIdUtils.ArbitrumOne(),
+            "Unsupported segregated funding chain"
+        );
+        require(destination != address(0), "Zero segregated funding destination");
+        segregatedFundingDestinations[chainId] = destination;
+    }
 
     function _testERC4626Onboarding(
         address vault,
@@ -2077,7 +2088,10 @@ abstract contract SparkLiquidityLayerTests is SpellRunner {
 
         IERC20 asset = IERC20(p.asset);
 
-        uint256 transferLimit   = p.ctx.rateLimits.getCurrentRateLimit(p.transferKey);
+        uint256 transferLimit = p.ctx.rateLimits.getCurrentRateLimit(p.transferKey);
+        if (p.destination != address(0) && p.destination == segregatedFundingDestinations[block.chainid]) {
+            p.transferAmount = p.transferAmount > transferLimit ? transferLimit : p.transferAmount;
+        }
         uint256 transferAmount1 = p.transferAmount / 4;
         uint256 transferAmount2 = p.transferAmount - transferAmount1;
 
@@ -2152,8 +2166,12 @@ abstract contract SparkLiquidityLayerTests is SpellRunner {
 
         skip(1 days + 1 seconds);  // +1 second due to rounding
 
-        assertEq(p.ctx.rateLimits.getCurrentRateLimit(p.transferKey), transferLimit);  // Should be this for unlimited transfers as well
-        assertEq(p.ctx.rateLimits.getCurrentRateLimit(p.transferKey), p.ctx.rateLimits.getRateLimitData(p.transferKey).maxAmount);
+        if (p.ctx.rateLimits.getRateLimitData(p.transferKey).slope == 0 && !unlimitedTransfer) {
+            assertEq(p.ctx.rateLimits.getCurrentRateLimit(p.transferKey), transferLimit - p.transferAmount);
+        } else {
+            assertEq(p.ctx.rateLimits.getCurrentRateLimit(p.transferKey), transferLimit);  // Includes unlimited transfers
+            assertEq(p.ctx.rateLimits.getCurrentRateLimit(p.transferKey), p.ctx.rateLimits.getRateLimitData(p.transferKey).maxAmount);
+        }
     }
 
     function _testVaultTakeIntegration(VaultTakeE2ETestParams memory p) internal {
@@ -3412,7 +3430,11 @@ abstract contract SparkLiquidityLayerTests is SpellRunner {
     }
 
     // TODO: Use domain specific helper function naming here
-    function _getPreExecutionIntegrations() internal view returns (SLLIntegration[] memory integrations) {
+    function _getPreExecutionIntegrations() internal view returns (SLLIntegration[] memory) {
+        return _withSegregatedFunding(_getPreExecutionLegacyIntegrations());
+    }
+
+    function _getPreExecutionLegacyIntegrations() internal view returns (SLLIntegration[] memory integrations) {
         if (block.chainid == ChainIdUtils.Avalanche()) {
             return _getPreExecutionIntegrationsAvalanche();
         }
@@ -3450,13 +3472,40 @@ abstract contract SparkLiquidityLayerTests is SpellRunner {
         }
     }
 
-    function _getPostExecutionIntegrations(
+    function _getPostExecutionIntegrations(SLLIntegration[] memory integrations)
+        internal view returns (SLLIntegration[] memory)
+    {
+        return _withSegregatedFunding(_getPostExecutionLegacyIntegrations(integrations));
+    }
+
+    function _withSegregatedFunding(SLLIntegration[] memory integrations)
+        internal view returns (SLLIntegration[] memory result)
+    {
+        address destination = segregatedFundingDestinations[block.chainid];
+        if (destination == address(0)) return integrations;
+
+        address usdc = block.chainid == ChainIdUtils.Ethereum() ? Ethereum.USDC
+            : block.chainid == ChainIdUtils.Base() ? Base.USDC : Arbitrum.USDC;
+        SLLIntegration memory funding = _createTransferAssetIntegration("SEGREGATED_FUNDING-USDC", usdc, destination);
+        bool active = _getSparkLiquidityLayerContext().rateLimits.getRateLimitData(funding.entryId).maxAmount != 0;
+
+        uint256 count = active ? 1 : 0;
+        for (uint256 i = 0; i < integrations.length; ++i) {
+            if (integrations[i].entryId != funding.entryId) ++count;
+        }
+        result = new SLLIntegration[](count);
+        uint256 index;
+        for (uint256 i = 0; i < integrations.length; ++i) {
+            if (integrations[i].entryId != funding.entryId) result[index++] = integrations[i];
+        }
+        if (active) result[index] = funding;
+    }
+
+    function _getPostExecutionLegacyIntegrations(
         SLLIntegration[] memory integrations
     )
         internal view returns (SLLIntegration[] memory newIntegrations)
     {
-        newIntegrations = new SLLIntegration[](integrations.length);
-
         if (block.chainid == ChainIdUtils.Ethereum()) {
             return _getPostExecutionIntegrationsMainnet(integrations);
         }

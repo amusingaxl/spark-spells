@@ -41,6 +41,9 @@ jobs:
           forge test -vvv
         id: test
 
+      - name: Run segregated PAU unit tests
+        run: FOUNDRY_PROFILE=segregated forge test --match-contract '^SegregatedPAUTest$' -vvv
+
       # submits a PR comment with a spell simulation
       - name: Spell Caster
         uses: marsfoundation/spell-caster@action
